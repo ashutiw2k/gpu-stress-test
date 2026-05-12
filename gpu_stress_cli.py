@@ -12,7 +12,7 @@ import os
 from datetime import datetime
 from torch import nn
 
-import pynvml
+import pynvml  # nvidia-ml-py package — installs as the pynvml module
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
@@ -104,16 +104,32 @@ def stress_test(epochs, batch_size, vram_fraction, log_file, result_dict):
     opt = torch.optim.Adam(model.parameters(), lr=1e-4)
     loss_fn = nn.CrossEntropyLoss()
 
-    # Determine dataset size for VRAM fill
-    props = torch.cuda.get_device_properties(0)
-    total_vram = props.total_memory
-    target_bytes = int(total_vram * vram_fraction)
+    # Run one full calibration step to measure real per-step peak overhead.
+    # This accounts for Adam state init, forward activations, and gradients.
+    torch.cuda.reset_peak_memory_stats(0)
+    _x = torch.randn(batch_size, 3, 224, 224, device="cuda")
+    _y = torch.randint(0, 1000, (batch_size,), device="cuda")
+    loss_fn(model(_x), _y).backward()
+    opt.step()
+    opt.zero_grad()
+    del _x, _y
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+    current_allocated = torch.cuda.memory_allocated(0)
+    peak_allocated = torch.cuda.max_memory_allocated(0)
+    per_step_overhead = int((peak_allocated - current_allocated) * 1.5)  # 1.5x safety margin
+
+    free_vram, _ = torch.cuda.mem_get_info(0)
+    target_bytes = int(max(0, free_vram - per_step_overhead) * vram_fraction)
     bytes_per_img = 3 * 224 * 224 * 4
 
-    dataset_size = target_bytes // bytes_per_img
+    dataset_size = max(batch_size, target_bytes // bytes_per_img)
     steps_per_epoch = dataset_size // batch_size
 
-    print(f"Dataset size: {dataset_size:,} images")
+    print(f"Free VRAM after model+Adam init: {free_vram / 1024**3:.2f} GB")
+    print(f"Per-step activation overhead:    {(peak_allocated - current_allocated) / 1024**3:.2f} GB (reserved {per_step_overhead / 1024**3:.2f} GB)")
+    print(f"Dataset size: {dataset_size:,} images ({target_bytes / 1024**3:.2f} GB)")
     print(f"Steps per epoch: {steps_per_epoch}")
 
     x_data = torch.randn(dataset_size, 3, 224, 224, device="cuda")
@@ -216,6 +232,7 @@ def main():
         monitor_running = False
         t.join()
         log_file.close()
+        pynvml.nvmlShutdown()
 
     # Save results JSON
     with open(result_path, "w") as f:

@@ -16,8 +16,8 @@ dependencies = [
     "numpy",
     "pandas",
     "matplotlib",
-    "pynvml",
-    "psutil"
+    "psutil",
+    "nvidia-ml-py>=13.595.45",
 ]
 
 [project.optional-dependencies]
